@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>STAX - Day 7</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;user-select:none}
+  html,body{overflow:hidden;touch-action:none;background:#080510}
+  body{font-family:'Courier New',monospace;color:#eee;display:flex;flex-direction:column;align-items:center;padding:12px}
+  h1{font-size:24px;letter-spacing:5px;color:#c77dff;text-shadow:0 0 14px rgba(199,125,255,.45);margin-bottom:2px}
+  #sub{color:#666;font-size:11px;margin-bottom:8px}
+  #hud{display:flex;gap:22px;font-size:13px;color:#c77dff;margin-bottom:7px}
+  #wrap{position:relative;border:2px solid #1a0e2a;box-shadow:0 0 28px rgba(199,125,255,.07)}
+  canvas{display:block}
+  #overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(8,5,16,.92);text-align:center;padding:20px}
+  #overlay h2{font-size:21px;color:#c77dff;letter-spacing:3px;margin-bottom:10px}
+  #overlay p{font-size:11.5px;color:#888;max-width:300px;line-height:1.6;margin-bottom:18px}
+  #overlay button{background:#c77dff;color:#080510;border:none;font-family:inherit;font-weight:bold;font-size:13px;padding:10px 28px;border-radius:6px;cursor:pointer;letter-spacing:2px}
+  #overlay button:active{background:#ff6fd8}
+  #btns{margin-top:11px;display:flex;gap:10px}
+  #btns button{background:#100818;border:1px solid #2a1a3a;color:#aaa;padding:7px 14px;font-family:inherit;font-size:12px;cursor:pointer;border-radius:6px}
+  #btns button:hover{border-color:#c77dff}
+  #info{margin-top:8px;font-size:10px;color:#333;text-align:center;max-width:340px}
+  @media(max-width:480px){h1{font-size:18px}#hud{font-size:11px;gap:14px}}
+</style>
+</head>
+<body>
+<h1>STAX</h1>
+<div id="sub">Day 7 — time the drop, build the tower</div>
+<div id="hud">
+  <div id="scoreLabel">SCORE: 0</div>
+  <div id="bestLabel">BEST: 0</div>
+  <div id="comboLabel">COMBO: 0</div>
+</div>
+<div id="wrap">
+  <canvas id="g" width="360" height="520"></canvas>
+  <div id="overlay">
+    <h2>STAX</h2>
+    <p>Tap, click, or press SPACE to drop the sliding block. Land it perfectly on the one below for a PERFECT bonus. Miss entirely and it's over. How high can you stack?</p>
+    <button id="startBtn">BUILD</button>
+  </div>
+</div>
+<div id="btns">
+  <button id="muteBtn">SOUND: ON</button>
+  <button id="restartBtn">RESTART</button>
+</div>
+<div id="info">Tap anywhere or press SPACE. Perfect alignment gives combo multiplier and no width loss.</div>
+
+<script>
+(function(){
+/* ── Audio ── */
+var AC=null,muted=false;
+function ac(){if(!AC)AC=new(window.AudioContext||window.webkitAudioContext)();return AC;}
+function tone(f,d,t,v){
+  if(muted)return;
+  try{var c=ac(),o=c.createOscillator(),g=c.createGain();
+    o.type=t||'sine';o.frequency.setValueAtTime(f,c.currentTime);
+    g.gain.setValueAtTime(v||.07,c.currentTime);
+    g.gain.exponentialRampToValueAtTime(.001,c.currentTime+d);
+    o.connect(g);g.connect(c.destination);o.start();o.stop(c.currentTime+d);}catch(e){}
+}
+function sndDrop(i){tone(220+i*18,.1,'sine',.07);}
+function sndPerfect(){tone(880,.08,'sine',.08);setTimeout(function(){tone(1100,.1,'sine',.08);},70);}
+function sndChop(){tone(110,.12,'sawtooth',.07);}
+function sndDead(){tone(200,.12,'sawtooth',.09);setTimeout(function(){tone(130,.2,'sawtooth',.1);},110);}
+function sndStart(){tone(440,.09,'square',.06);}
+function unlock(){try{var c=ac();if(c.state==='suspended')c.resume();}catch(e){}}
+document.addEventListener('touchstart',unlock,{once:true});
+document.addEventListener('click',unlock,{once:true});
+
+/* ── Canvas ── */
+var cv=document.getElementById('g'),cx=cv.getContext('2d'),W=cv.width,H=cv.height;
+var overlay=document.getElementById('overlay');
+var oH2=overlay.querySelector('h2'),oP=overlay.querySelector('p'),startBtn=document.getElementById('startBtn');
+var scoreLabel=document.getElementById('scoreLabel'),bestLabel=document.getElementById('bestLabel'),comboLabel=document.getElementById('comboLabel');
+
+/* ── Config ── */
+var BLOCK_H=22,BASE_Y=H-30,PERFECT_TOL=4,MIN_W=18;
+var SPEED_BASE=2.4,SPEED_INC=0.08,SPEED_MAX=7.2;
+var VIEWPORT_BLOCKS=18; // blocks visible at once, tower scrolls up
+
+/* ── Palette ── */
+var PALETTE=['#c77dff','#9b5de5','#f72585','#4cc9f0','#4361ee','#7209b7','#00b4d8','#ff6fd8','#3a86ff','#ffbe0b'];
+
+/* ── State ── */
+var stack,slider,score,best=0,combo,running=false,dropping,particles,scrollY;
+
+function resetState(){
+  /* base block */
+  var baseW=140;
+  stack=[{x:(W-baseW)/2,y:0,w:baseW,col:PALETTE[0]}];
+  scrollY=0;
+  score=0;combo=0;dropping=false;particles=[];
+  spawnSlider();
+  updateHud();
+}
+
+function spawnSlider(){
+  var top=stack[stack.length-1];
+  var level=stack.length;
+  var sp=Math.min(SPEED_MAX,SPEED_BASE+level*SPEED_INC);
+  /* alternate direction */
+  var fromLeft=level%2===1;
+  slider={
+    x:fromLeft?-top.w:W,
+    y:top.y-BLOCK_H,
+    w:top.w,
+    col:PALETTE[level%PALETTE.length],
+    vx:fromLeft?sp:-sp
+  };
+}
+
+function drop(){
+  if(!running||dropping)return;
+  dropping=true;
+  var top=stack[stack.length-1];
+
+  /* overlap */
+  var overlapL=Math.max(slider.x,top.x);
+  var overlapR=Math.min(slider.x+slider.w,top.x+top.w);
+  var overlapW=overlapR-overlapL;
+
+  if(overlapW<=0){/* miss — game over */
+    sndDead();
+    endGame();return;
+  }
+
+  var perfect=Math.abs(slider.x-top.x)<=PERFECT_TOL;
+
+  if(perfect){
+    combo++;
+    score+=10+combo*5;
+    sndPerfect();
+    burst(top.x+top.w/2,getBlockScreenY(slider.y),'#ffffff',14);
+    /* keep width */
+    stack.push({x:top.x,y:slider.y,w:top.w,col:slider.col});
+  } else {
+    combo=0;
+    score+=10;
+    sndDrop(stack.length%8);
+    /* chop off overhang */
+    var chX=slider.x<top.x?slider.x:overlapR;
+    var chW=slider.w-overlapW;
+    sndChop();
+    burst(chX+chW/2,getBlockScreenY(slider.y),slider.col,8);
+    stack.push({x:overlapL,y:slider.y,w:overlapW,col:slider.col});
+  }
+
+  if(score>best)best=score;
+
+  /* scroll viewport up when tower grows */
+  var topBlock=stack[stack.length-1];
+  var screenTop=topBlock.y-scrollY;
+  if(screenTop<H*0.4) scrollY=topBlock.y-H*0.4;
+
+  updateHud();
+
+  /* too narrow */
+  if(stack[stack.length-1].w<MIN_W){sndDead();endGame();return;}
+
+  setTimeout(function(){dropping=false;spawnSlider();},120);
+}
+
+/* ── Visual helpers ── */
+function getBlockScreenY(worldY){return worldY-scrollY;}
+
+function burst(x,y,col,n){
+  for(var i=0;i<n;i++){
+    var a=Math.random()*Math.PI*2,sp=1+Math.random()*3;
+    particles.push({x:x,y:y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:22,max:22,col:col});
+  }
+}
+
+/* ── Update ── */
+function update(dt){
+  if(!dropping&&slider){
+    slider.x+=slider.vx*(dt/16);
+    /* bounce */
+    if(slider.x+slider.w>W&&slider.vx>0){slider.vx*=-1;slider.x=W-slider.w;}
+    if(slider.x<0&&slider.vx<0){slider.vx*=-1;slider.x=0;}
+  }
+  for(var i=particles.length-1;i>=0;i--){
+    var p=particles[i];
+    p.x+=p.vx;p.y+=p.vy;p.vy+=0.14;p.life--;
+    if(p.life<=0)particles.splice(i,1);
+  }
+}
+
+/* ── Draw ── */
+function draw(){
+  cx.clearRect(0,0,W,H);
+  /* bg */
+  cx.fillStyle='#080510';cx.fillRect(0,0,W,H);
+
+  /* faint vertical guides */
+  cx.strokeStyle='rgba(199,125,255,.04)';cx.lineWidth=1;
+  for(var gx=0;gx<W;gx+=40){cx.beginPath();cx.moveTo(gx,0);cx.lineTo(gx,H);cx.stroke();}
+
+  /* stack blocks */
+  stack.forEach(function(bl,idx){
+    var sy=getBlockScreenY(bl.y);
+    if(sy>H+BLOCK_H||sy<-BLOCK_H*2)return;
+    var bright=0.5+0.5*(idx/stack.length);
+    cx.fillStyle=bl.col;cx.globalAlpha=bright;
+    cx.shadowColor=bl.col;cx.shadowBlur=idx===stack.length-1?14:4;
+    cx.fillRect(bl.x,sy,bl.w,BLOCK_H-2);
+    cx.globalAlpha=1;cx.shadowBlur=0;
+    /* top edge shine */
+    cx.fillStyle='rgba(255,255,255,.15)';
+    cx.fillRect(bl.x,sy,bl.w,3);
+  });
+
+  /* slider */
+  if(slider&&!dropping){
+    var sy2=getBlockScreenY(slider.y);
+    cx.fillStyle=slider.col;cx.shadowColor=slider.col;cx.shadowBlur=16;cx.globalAlpha=0.92;
+    cx.fillRect(slider.x,sy2,slider.w,BLOCK_H-2);
+    cx.globalAlpha=1;cx.shadowBlur=0;
+    /* guide line */
+    var top=stack[stack.length-1];
+    cx.strokeStyle='rgba(255,255,255,.08)';cx.lineWidth=1;cx.setLineDash([4,4]);
+    cx.beginPath();cx.moveTo(top.x,sy2+BLOCK_H/2);cx.lineTo(top.x+top.w,sy2+BLOCK_H/2);cx.stroke();
+    cx.setLineDash([]);
+  }
+
+  /* particles */
+  particles.forEach(function(p){
+    cx.globalAlpha=p.life/p.max;cx.fillStyle=p.col;
+    cx.beginPath();cx.arc(p.x,p.y,2.5*(p.life/p.max),0,Math.PI*2);cx.fill();
+  });cx.globalAlpha=1;
+
+  /* height label */
+  var ht=stack.length-1;
+  if(ht>0){
+    cx.fillStyle='rgba(199,125,255,.4)';cx.font='10px Courier New';cx.textAlign='right';
+    cx.fillText('HEIGHT '+ht,W-8,20);
+  }
+
+  /* combo flash */
+  if(combo>=2){
+    cx.fillStyle='rgba(255,255,255,'+(0.6+0.4*Math.sin(Date.now()/120))+')';
+    cx.font='bold 13px Courier New';cx.textAlign='center';
+    cx.fillText('PERFECT x'+combo,W/2,40);
+  }
+}
+
+/* ── Loop ── */
+var lastT=null;
+function loop(ts){
+  if(!running)return;
+  if(lastT===null)lastT=ts;
+  var dt=Math.min(ts-lastT,50);lastT=ts;
+  update(dt);draw();
+  requestAnimationFrame(loop);
+}
+
+function startGame(){resetState();running=true;lastT=null;overlay.style.display='none';sndStart();requestAnimationFrame(loop);}
+function endGame(){
+  running=false;
+  setTimeout(function(){
+    oH2.textContent='COLLAPSED';
+    oP.textContent='Height: '+(stack.length-1)+'  •  Score: '+score+'  •  Best: '+best;
+    startBtn.textContent='REBUILD';
+    overlay.style.display='flex';
+  },300);
+}
+
+function updateHud(){
+  scoreLabel.textContent='SCORE: '+score;
+  bestLabel.textContent='BEST: '+best;
+  comboLabel.textContent='COMBO: '+combo;
+}
+
+/* ── Input ── */
+startBtn.addEventListener('click',startGame);
+document.getElementById('restartBtn').addEventListener('click',function(){
+  running=false;
+  oH2.textContent='STAX';
+  oP.textContent='Tap, click, or press SPACE to drop the sliding block. Land it perfectly on the one below for a PERFECT bonus. Miss entirely and it\'s over. How high can you stack?';
+  startBtn.textContent='BUILD';
+  overlay.style.display='flex';
+  resetState();
+});
+document.getElementById('muteBtn').addEventListener('click',function(){muted=!muted;this.textContent=muted?'SOUND: OFF':'SOUND: ON';});
+
+cv.addEventListener('touchstart',function(e){e.preventDefault();drop();},{passive:false});
+cv.addEventListener('mousedown',drop);
+document.addEventListener('keydown',function(e){if(e.code==='Space'||e.key===' '){drop();e.preventDefault();}});
+
+resetState();
+})();
+</script>
+</body>
+</html>
